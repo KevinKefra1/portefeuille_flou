@@ -3,30 +3,88 @@
   GESTION DE PORTEFEUILLE À REVENUS FLOUS
   Modèle mathématique basé sur les nombres flous triangulaires
   Optimisation par scipy.optimize (Markowitz flou)
+  Version interactive avec menu terminal
 =============================================================================
 
-Auteur  : Projet de probabilités & raisonnement probabiliste
+Auteur  : Tcheumtchoua Koagne Franck Kevin — Master 2 Intelligence Artificielle
 Langage : Python 3.10+
 Dépend. : numpy, scipy, matplotlib
-
-Formules clés :
-  - Nombre flou triangulaire : r̃ = (r_min, r_mod, r_max)
-  - α-coupe : [r̃]^α = [r_min + α(r_mod-r_min), r_max - α(r_max-r_mod)]
-  - Espérance floue : Ẽ(r̃) = (r_min + 2·r_mod + r_max) / 4
-  - Variance floue  : σ̃²(r̃) = [(r_max-r_min)² + (r_mod-r_min)(r_max-r_mod)] / 12
-  - Covariance floue : COṼ(i,j) ≈ ρ_ij · σ̃_i · σ̃_j
 =============================================================================
 """
 
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from scipy.optimize import minimize, LinearConstraint
+from scipy.optimize import minimize
 from scipy.stats import norm
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. DÉFINITION DES ACTIFS (nombres flous triangulaires)
+# UTILITAIRES TERMINAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+CYAN   = "\033[96m"
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+RED    = "\033[91m"
+DIM    = "\033[2m"
+
+def titre(texte):
+    print(f"\n{BOLD}{CYAN}{'═'*60}{RESET}")
+    print(f"{BOLD}{CYAN}  {texte}{RESET}")
+    print(f"{BOLD}{CYAN}{'═'*60}{RESET}\n")
+
+def sous_titre(texte):
+    print(f"\n{BOLD}{YELLOW}  ▸ {texte}{RESET}")
+    print(f"{DIM}  {'─'*55}{RESET}")
+
+def ok(texte):    print(f"{GREEN}  ✔ {texte}{RESET}")
+def info(texte):  print(f"{CYAN}  ℹ {texte}{RESET}")
+def warn(texte):  print(f"{YELLOW}  ⚠ {texte}{RESET}")
+def erreur(texte):print(f"{RED}  ✘ {texte}{RESET}")
+
+def saisir_float(prompt, defaut=None, min_val=None, max_val=None):
+    """Lecture sécurisée d'un float avec valeur par défaut et bornes."""
+    while True:
+        hint = f" [{defaut}]" if defaut is not None else ""
+        try:
+            raw = input(f"    {prompt}{hint} : ").strip()
+            if raw == "" and defaut is not None:
+                return float(defaut)
+            val = float(raw)
+            if min_val is not None and val < min_val:
+                warn(f"Valeur minimum : {min_val}")
+                continue
+            if max_val is not None and val > max_val:
+                warn(f"Valeur maximum : {max_val}")
+                continue
+            return val
+        except ValueError:
+            erreur("Veuillez entrer un nombre valide.")
+
+def saisir_int(prompt, defaut=None, min_val=1, max_val=999):
+    while True:
+        hint = f" [{defaut}]" if defaut is not None else ""
+        try:
+            raw = input(f"    {prompt}{hint} : ").strip()
+            if raw == "" and defaut is not None:
+                return int(defaut)
+            val = int(raw)
+            if val < min_val or val > max_val:
+                warn(f"Entrez une valeur entre {min_val} et {max_val}.")
+                continue
+            return val
+        except ValueError:
+            erreur("Veuillez entrer un entier valide.")
+
+def pause():
+    input(f"\n{DIM}  Appuyez sur Entrée pour continuer...{RESET}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ÉTAT GLOBAL DE L'APPLICATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 ACTIFS = {
@@ -36,7 +94,6 @@ ACTIFS = {
     "Immobilier D":{"r_min": 4.0,  "r_mod": 9.0,  "r_max": 16.0},
 }
 
-# Matrice de corrélation entre actifs (estimation)
 CORRELATION = np.array([
     [1.00,  0.35, -0.10,  0.20],
     [0.35,  1.00,  0.05,  0.15],
@@ -44,417 +101,556 @@ CORRELATION = np.array([
     [0.20,  0.15, -0.05,  1.00],
 ])
 
-NOMS   = list(ACTIFS.keys())
-N      = len(NOMS)
-RF     = 2.0   # Taux sans risque (%)
-ALPHA  = 0.5   # Niveau de confiance flou par défaut
+RF    = 2.0
+ALPHA = 0.5
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. FONCTIONS MATHÉMATIQUES FLOUES
+# FONCTIONS MATHÉMATIQUES FLOUES
 # ─────────────────────────────────────────────────────────────────────────────
 
-def membership(x, actif: dict) -> float:
-    """Fonction d'appartenance triangulaire μ(x) ∈ [0,1]."""
+def membership(x, actif):
     a, m, b = actif["r_min"], actif["r_mod"], actif["r_max"]
-    if x <= a or x >= b:
-        return 0.0
-    elif x <= m:
-        return (x - a) / (m - a)
-    else:
-        return (b - x) / (b - m)
+    if x <= a or x >= b: return 0.0
+    return (x - a)/(m - a) if x <= m else (b - x)/(b - m)
 
-
-def alpha_coupe(actif: dict, alpha: float) -> tuple:
-    """
-    α-coupe d'un nombre flou triangulaire.
-    Retourne l'intervalle [r_L^α, r_R^α].
-    """
+def alpha_coupe(actif, alpha):
     a, m, b = actif["r_min"], actif["r_mod"], actif["r_max"]
-    r_L = a + alpha * (m - a)
-    r_R = b - alpha * (b - m)
-    return (r_L, r_R)
+    return (a + alpha*(m - a), b - alpha*(b - m))
 
-
-def esperance_floue(actif: dict) -> float:
-    """
-    Espérance floue d'un nombre triangulaire.
-    Ẽ(r̃) = (r_min + 2·r_mod + r_max) / 4
-    """
+def esperance_floue(actif):
     a, m, b = actif["r_min"], actif["r_mod"], actif["r_max"]
     return (a + 2*m + b) / 4
 
-
-def variance_floue(actif: dict) -> float:
-    """
-    Variance floue d'un nombre triangulaire.
-    σ̃²(r̃) = [(r_max-r_min)² + (r_mod-r_min)(r_max-r_mod)] / 12
-    """
+def variance_floue(actif):
     a, m, b = actif["r_min"], actif["r_mod"], actif["r_max"]
     return ((b - a)**2 + (m - a)*(b - m)) / 12
 
-
-def ecart_type_flou(actif: dict) -> float:
-    """σ̃(r̃) = sqrt(σ̃²(r̃))"""
+def ecart_type_flou(actif):
     return np.sqrt(variance_floue(actif))
 
-
-def matrice_covariance_floue() -> np.ndarray:
-    """
-    Matrice de covariance floue Σ̃ de taille (N×N).
-    COṼ(i,j) = ρ_ij · σ̃_i · σ̃_j
-    """
-    noms = NOMS
+def matrice_covariance_floue():
+    noms  = list(ACTIFS.keys())
     sigma = np.array([ecart_type_flou(ACTIFS[n]) for n in noms])
-    cov   = np.outer(sigma, sigma) * CORRELATION
-    return cov
+    return np.outer(sigma, sigma) * CORRELATION
 
-
-def variance_portefeuille(w: np.ndarray, cov: np.ndarray) -> float:
-    """σ̃²(P) = wᵀ · Σ̃ · w"""
+def variance_portefeuille(w, cov):
     return float(w @ cov @ w)
 
-
-def esperance_portefeuille(w: np.ndarray) -> float:
-    """Ẽ(P) = Σ wᵢ · Ẽ(r̃ᵢ)"""
-    E = np.array([esperance_floue(ACTIFS[n]) for n in NOMS])
+def esperance_portefeuille(w):
+    E = np.array([esperance_floue(ACTIFS[n]) for n in ACTIFS])
     return float(w @ E)
 
-
-def ratio_sharpe_flou(w: np.ndarray, cov: np.ndarray, rf: float = RF) -> float:
-    """
-    Ratio de Sharpe flou.
-    S̃ = (Ẽ(P) - rf) / σ̃(P)
-    """
+def ratio_sharpe_flou(w, cov, rf=None):
+    rf = rf if rf is not None else RF
     ep = esperance_portefeuille(w)
     vp = variance_portefeuille(w, cov)
     return (ep - rf) / np.sqrt(vp) if vp > 0 else 0.0
 
-
-def indice_possibilite(w: np.ndarray, cov: np.ndarray, seuil: float = RF) -> float:
-    """
-    Indice de possibilité π que le rendement dépasse le seuil.
-    π = P(Ẽ(P) ≥ seuil) ≈ Φ((Ẽ(P) - seuil) / σ̃(P))
-    """
+def indice_possibilite(w, cov, seuil=None):
+    seuil = seuil if seuil is not None else RF
     ep = esperance_portefeuille(w)
     sp = np.sqrt(variance_portefeuille(w, cov))
     return float(norm.cdf((ep - seuil) / sp)) if sp > 0 else 0.0
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. OPTIMISATION — PORTEFEUILLE OPTIMAL (min variance)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def optimiser_min_variance(cov: np.ndarray, E_cible: float | None = None):
-    """
-    Minimise la variance floue du portefeuille.
-
-    Problème :
-        min  wᵀ Σ̃ w
-        s.t. Σ wᵢ = 1
-             wᵢ ≥ 0
-             Ẽ(P) ≥ E_cible  (si spécifié)
-
-    Retourne : poids optimaux w*
-    """
-    E_vect = np.array([esperance_floue(ACTIFS[n]) for n in NOMS])
-
-    # Fonction objectif
-    def objectif(w):
-        return variance_portefeuille(w, cov)
-
-    def grad_objectif(w):
-        return 2 * cov @ w
-
-    # Contraintes
-    contraintes = [{"type": "eq",
-                    "fun": lambda w: np.sum(w) - 1,
-                    "jac": lambda w: np.ones(N)}]
-
-    if E_cible is not None:
-        contraintes.append({
-            "type": "ineq",
-            "fun": lambda w: E_vect @ w - E_cible,
-            "jac": lambda w: E_vect,
-        })
-
-    # Bornes : 0 ≤ wᵢ ≤ 1
-    bornes = [(0.0, 1.0)] * N
-
-    # Point de départ : équipondéré
-    w0 = np.ones(N) / N
-
-    resultat = minimize(
-        objectif,
-        w0,
-        jac=grad_objectif,
-        method="SLSQP",
-        bounds=bornes,
-        constraints=contraintes,
-        options={"ftol": 1e-12, "maxiter": 1000},
-    )
-
-    if not resultat.success:
-        print(f"  [Avertissement] Convergence : {resultat.message}")
-
-    return resultat.x
-
-
-def optimiser_max_sharpe(cov: np.ndarray):
-    """
-    Maximise le ratio de Sharpe flou.
-    Équivalent à minimiser -S̃(w).
-    """
-    def neg_sharpe(w):
-        return -ratio_sharpe_flou(w, cov)
-
+def optimiser_min_variance(cov, E_cible=None):
+    N      = len(ACTIFS)
+    E_vect = np.array([esperance_floue(ACTIFS[n]) for n in ACTIFS])
     contraintes = [{"type": "eq", "fun": lambda w: np.sum(w) - 1}]
-    bornes  = [(0.0, 1.0)] * N
-    w0      = np.ones(N) / N
+    if E_cible is not None:
+        contraintes.append({"type": "ineq", "fun": lambda w: E_vect @ w - E_cible})
+    res = minimize(lambda w: variance_portefeuille(w, cov),
+                   np.ones(N)/N, method="SLSQP",
+                   bounds=[(0, 1)]*N, constraints=contraintes,
+                   options={"ftol": 1e-12, "maxiter": 1000})
+    return res.x
 
-    resultat = minimize(
-        neg_sharpe,
-        w0,
-        method="SLSQP",
-        bounds=bornes,
-        constraints=contraintes,
-        options={"ftol": 1e-12, "maxiter": 1000},
-    )
-    return resultat.x
+def optimiser_max_sharpe(cov):
+    N = len(ACTIFS)
+    res = minimize(lambda w: -ratio_sharpe_flou(w, cov),
+                   np.ones(N)/N, method="SLSQP",
+                   bounds=[(0, 1)]*N,
+                   constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1}],
+                   options={"ftol": 1e-12, "maxiter": 1000})
+    return res.x
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. FRONTIÈRE D'EFFICIENCE FLOUE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def calculer_frontiere(cov: np.ndarray, nb_points: int = 60):
-    """
-    Calcule la frontière d'efficience floue en balayant
-    les niveaux de rendement cible de Ẽ_min à Ẽ_max.
-
-    Retourne : (risques, rendements, poids)
-    """
-    E_vect = np.array([esperance_floue(ACTIFS[n]) for n in NOMS])
-    E_min  = E_vect.min() + 0.01
-    E_max  = E_vect.max() - 0.01
-    cibles = np.linspace(E_min, E_max, nb_points)
-
-    risques     = []
-    rendements  = []
-    poids_liste = []
-
+def calculer_frontiere(cov, nb_points=60):
+    E_vect = np.array([esperance_floue(ACTIFS[n]) for n in ACTIFS])
+    cibles = np.linspace(E_vect.min()+0.01, E_vect.max()-0.01, nb_points)
+    risques, rendements, poids_liste = [], [], []
     for E_c in cibles:
-        w = optimiser_min_variance(cov, E_cible=E_c)
+        w  = optimiser_min_variance(cov, E_cible=E_c)
         ep = esperance_portefeuille(w)
         vp = variance_portefeuille(w, cov)
         if vp >= 0:
             risques.append(np.sqrt(vp))
             rendements.append(ep)
             poids_liste.append(w)
-
     return np.array(risques), np.array(rendements), poids_liste
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. ANALYSE DES α-COUPES
+# MODULE 1 — AFFICHER / MODIFIER LES ACTIFS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def analyser_alpha_coupes(alphas: list | None = None):
-    """
-    Calcule les intervalles α-coupés pour différents niveaux α
-    et montre leur influence sur la variance du portefeuille.
-    """
-    if alphas is None:
-        alphas = [0.0, 0.25, 0.5, 0.75, 1.0]
+def menu_actifs():
+    global ACTIFS, CORRELATION
+    while True:
+        titre("GESTION DES ACTIFS")
+        noms = list(ACTIFS.keys())
+        print(f"  {BOLD}{'#':<4} {'Actif':<16} {'r_min':>8} {'r_mod':>8} {'r_max':>8} {'Ẽ':>8} {'σ̃':>8}{RESET}")
+        print(f"  {'─'*58}")
+        for i, (nom, a) in enumerate(ACTIFS.items(), 1):
+            E = esperance_floue(a)
+            S = ecart_type_flou(a)
+            print(f"  {i:<4} {nom:<16} {a['r_min']:>8.2f} {a['r_mod']:>8.2f} "
+                  f"{a['r_max']:>8.2f} {E:>8.3f} {S:>8.3f}")
 
-    print("\n" + "─"*65)
-    print(f"  ANALYSE DES α-COUPES")
-    print("─"*65)
-    print(f"  {'Actif':<16} {'α':<6} {'[r_L^α':>10} {'r_R^α]':>10}  Largeur")
-    print("─"*65)
+        print(f"\n  {BOLD}Options :{RESET}")
+        print("    [1-4] Modifier un actif    [a] Ajouter un actif")
+        print("    [s]   Supprimer un actif   [r] Réinitialiser")
+        print("    [q]   Retour au menu principal")
 
+        choix = input(f"\n  {BOLD}Choix :{RESET} ").strip().lower()
+
+        if choix == "q":
+            break
+
+        elif choix in [str(i) for i in range(1, len(ACTIFS)+1)]:
+            idx  = int(choix) - 1
+            nom  = noms[idx]
+            actif = ACTIFS[nom]
+            sous_titre(f"Modifier : {nom}")
+            info("Laissez vide pour conserver la valeur actuelle.")
+            r_min = saisir_float("r_min (rendement pessimiste %)", defaut=actif["r_min"])
+            r_mod = saisir_float("r_mod (rendement modal %)",      defaut=actif["r_mod"], min_val=r_min)
+            r_max = saisir_float("r_max (rendement optimiste %)",  defaut=actif["r_max"], min_val=r_mod)
+            ACTIFS[nom] = {"r_min": r_min, "r_mod": r_mod, "r_max": r_max}
+            ok(f"Actif « {nom} » mis à jour.")
+            pause()
+
+        elif choix == "a":
+            sous_titre("Ajouter un nouvel actif")
+            nom = input("    Nom de l'actif : ").strip()
+            if not nom:
+                warn("Nom invalide.")
+                continue
+            if nom in ACTIFS:
+                warn("Cet actif existe déjà.")
+                continue
+            r_min = saisir_float("r_min (rendement pessimiste %)", min_val=-50, max_val=100)
+            r_mod = saisir_float("r_mod (rendement modal %)",      min_val=r_min, max_val=100)
+            r_max = saisir_float("r_max (rendement optimiste %)",  min_val=r_mod, max_val=100)
+            ACTIFS[nom] = {"r_min": r_min, "r_mod": r_mod, "r_max": r_max}
+            n = len(ACTIFS)
+            new_corr = np.ones((n, n)) * 0.1
+            new_corr[:n-1, :n-1] = CORRELATION
+            np.fill_diagonal(new_corr, 1.0)
+            CORRELATION = new_corr
+            ok(f"Actif « {nom} » ajouté (corrélation neutre = 0.1).")
+            pause()
+
+        elif choix == "s":
+            if len(ACTIFS) <= 2:
+                warn("Il faut au moins 2 actifs.")
+                continue
+            idx = saisir_int("Numéro de l'actif à supprimer", min_val=1, max_val=len(ACTIFS))
+            nom = noms[idx - 1]
+            confirm = input(f"    Supprimer « {nom} » ? (o/n) : ").strip().lower()
+            if confirm == "o":
+                del ACTIFS[nom]
+                n = len(ACTIFS)
+                new_corr = np.delete(np.delete(CORRELATION, idx-1, 0), idx-1, 1)
+                CORRELATION = new_corr
+                ok(f"« {nom} » supprimé.")
+            pause()
+
+        elif choix == "r":
+            ACTIFS = {
+                "Action A":    {"r_min": 2.0,  "r_mod": 8.0,  "r_max": 14.0},
+                "Action B":    {"r_min": 1.0,  "r_mod": 5.0,  "r_max": 11.0},
+                "Obligation C":{"r_min": 3.0,  "r_mod": 6.0,  "r_max":  9.0},
+                "Immobilier D":{"r_min": 4.0,  "r_mod": 9.0,  "r_max": 16.0},
+            }
+            CORRELATION = np.array([
+                [1.00,  0.35, -0.10,  0.20],
+                [0.35,  1.00,  0.05,  0.15],
+                [-0.10, 0.05,  1.00, -0.05],
+                [0.20,  0.15, -0.05,  1.00],
+            ])
+            ok("Actifs réinitialisés aux valeurs par défaut.")
+            pause()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODULE 2 — SIMULATEUR α-COUPE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def menu_alpha():
+    titre("SIMULATEUR α-COUPE")
+    info("L'α-coupe filtre l'intervalle de confiance flou.")
+    info("α = 0 → incertitude totale  |  α = 1 → valeur modale seule\n")
+
+    alpha = saisir_float("Choisissez un niveau α", defaut=0.5, min_val=0.0, max_val=1.0)
+
+    sous_titre(f"Intervalles α-coupés pour α = {alpha:.2f}")
+    print(f"\n  {BOLD}{'Actif':<16} {'[r_L^α':>10}  {'r_R^α]':>10}  {'Largeur':>8}  {'Milieu':>8}{RESET}")
+    print(f"  {'─'*56}")
     for nom, actif in ACTIFS.items():
-        for alpha in alphas:
-            lo, hi = alpha_coupe(actif, alpha)
-            print(f"  {nom:<16} {alpha:<6.2f} [{lo:>8.3f}, {hi:>8.3f}]  {hi-lo:>6.3f}")
-        print()
+        lo, hi = alpha_coupe(actif, alpha)
+        print(f"  {nom:<16} [{lo:>9.3f}, {hi:>9.3f}]  {hi-lo:>8.3f}  {(lo+hi)/2:>8.3f}")
+
+    print()
+    voir = input("  Tracer l'évolution des α-coupes ? (o/n) [o] : ").strip().lower()
+    if voir != "n":
+        COULEURS = ["#1D9E75", "#378ADD", "#7F77DD", "#D85A30"]
+        alphas_plot = np.linspace(0, 1, 80)
+        fig, ax = plt.subplots(figsize=(9, 5))
+        for (nom, actif), col in zip(ACTIFS.items(), COULEURS):
+            lo_arr = [alpha_coupe(actif, a)[0] for a in alphas_plot]
+            hi_arr = [alpha_coupe(actif, a)[1] for a in alphas_plot]
+            ax.fill_between(alphas_plot, lo_arr, hi_arr, alpha=0.18, color=col)
+            ax.plot(alphas_plot, lo_arr, color=col, lw=1.8)
+            ax.plot(alphas_plot, hi_arr, color=col, lw=1.8, label=nom)
+        ax.axvline(alpha, color="black", ls="--", lw=1.5, label=f"α = {alpha:.2f}")
+        ax.set_xlabel("Niveau α"); ax.set_ylabel("Rendement (%)")
+        ax.set_title("Évolution des α-coupes par actif")
+        ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+        plt.tight_layout(); plt.show()
+
+    pause()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. VISUALISATION
+# MODULE 3 — OPTIMISATION INTERACTIVE
 # ─────────────────────────────────────────────────────────────────────────────
 
-COULEURS = ["#1D9E75", "#378ADD", "#7F77DD", "#D85A30"]
+def menu_optimisation():
+    global RF
+    titre("OPTIMISATION DU PORTEFEUILLE")
 
+    print(f"  {BOLD}Stratégie d'optimisation :{RESET}")
+    print("    [1] Minimum variance floue")
+    print("    [2] Maximum ratio de Sharpe flou")
+    print("    [3] Cible de rendement personnalisée")
+    print("    [4] Comparer les trois stratégies")
 
-def tracer_resultats(cov: np.ndarray, w_mv: np.ndarray, w_ms: np.ndarray):
-    """Génère 4 graphiques : front d'efficience, allocation, fonctions d'appartenance, α-coupes."""
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
-    fig.suptitle("Gestion de Portefeuille à Revenus Flous\n(Modèle de Markowitz Flou)",
-                 fontsize=14, fontweight="bold", y=0.98)
+    choix = input(f"\n  {BOLD}Choix :{RESET} ").strip()
+    if choix not in ["1","2","3","4"]:
+        warn("Choix invalide."); pause(); return
 
-    # ── 4a. Front d'efficience ──────────────────────────────────────────────
-    ax = axes[0, 0]
-    risques, rendements, _ = calculer_frontiere(cov)
-    ax.plot(risques, rendements, color="#1D9E75", lw=2.5, label="Front d'efficience flou")
+    rf_new = saisir_float("Taux sans risque rf (%)", defaut=RF, min_val=0.0, max_val=20.0)
+    RF = rf_new
 
-    for w, label, marker, color in [
-        (w_mv, "Min Variance", "o", "#378ADD"),
-        (w_ms, "Max Sharpe",   "*", "#D85A30"),
-    ]:
+    cov = matrice_covariance_floue()
+    NOMS = list(ACTIFS.keys())
+    COULEURS = ["#1D9E75", "#378ADD", "#7F77DD", "#D85A30"]
+
+    def afficher_portefeuille(label, w):
         ep = esperance_portefeuille(w)
-        sp = np.sqrt(variance_portefeuille(w, cov))
-        ax.scatter(sp, ep, s=120, marker=marker, color=color,
-                   zorder=5, label=f"Portfolio {label}")
+        vp = variance_portefeuille(w, cov)
+        sh = ratio_sharpe_flou(w, cov, rf=RF)
+        pi = indice_possibilite(w, cov, seuil=RF)
+        sous_titre(label)
+        print(f"  {BOLD}{'Actif':<16} {'Poids':>8}  Barre{RESET}")
+        for nom, wi in zip(NOMS, w):
+            barre = "█" * int(wi * 32)
+            print(f"  {nom:<16} {wi*100:>7.2f}%  {GREEN}{barre}{RESET}")
+        print(f"\n  {CYAN}Ẽ(P)             = {ep:.4f} %{RESET}")
+        print(f"  {CYAN}σ̃²(P)            = {vp:.4f}{RESET}")
+        print(f"  {CYAN}σ̃(P)             = {np.sqrt(vp):.4f} %{RESET}")
+        print(f"  {CYAN}Ratio de Sharpe  = {sh:.4f}{RESET}")
+        print(f"  {CYAN}Indice possib.   = {pi:.4f}{RESET}")
 
-    ax.axhline(RF, color="gray", ls="--", lw=1, label=f"Taux sans risque {RF}%")
-    ax.set_xlabel("Risque flou σ̃(P)  (%)")
-    ax.set_ylabel("Espérance floue Ẽ(P)  (%)")
-    ax.set_title("Frontière d'efficience floue")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
+    if choix == "1":
+        w = optimiser_min_variance(cov)
+        afficher_portefeuille("Portefeuille Minimum Variance", w)
 
-    # ── 4b. Allocations ─────────────────────────────────────────────────────
-    ax = axes[0, 1]
-    x  = np.arange(N)
-    lar = 0.35
-    b1 = ax.bar(x - lar/2, w_mv * 100, lar, label="Min Variance",
-                color=COULEURS, alpha=0.85, edgecolor="white")
-    b2 = ax.bar(x + lar/2, w_ms * 100, lar, label="Max Sharpe",
-                color=COULEURS, alpha=0.45, edgecolor=COULEURS, linewidth=1.5)
-    ax.set_xticks(x)
-    ax.set_xticklabels(NOMS, fontsize=9, rotation=10)
-    ax.set_ylabel("Poids (%)")
-    ax.set_title("Allocation optimale des deux portefeuilles")
-    ax.legend(fontsize=9)
-    ax.grid(axis="y", alpha=0.3)
+    elif choix == "2":
+        w = optimiser_max_sharpe(cov)
+        afficher_portefeuille("Portefeuille Maximum Sharpe Flou", w)
 
-    # ── 4c. Fonctions d'appartenance ─────────────────────────────────────────
-    ax = axes[1, 0]
-    for (nom, actif), couleur in zip(ACTIFS.items(), COULEURS):
-        a, m, b = actif["r_min"], actif["r_mod"], actif["r_max"]
-        xs = np.linspace(a - 0.5, b + 0.5, 300)
-        ys = np.array([membership(x, actif) for x in xs])
-        ax.plot(xs, ys, color=couleur, lw=2, label=nom)
-        ax.fill_between(xs, ys, alpha=0.08, color=couleur)
-        ax.axvline(m, color=couleur, ls=":", lw=1)
+    elif choix == "3":
+        E_vect = np.array([esperance_floue(ACTIFS[n]) for n in ACTIFS])
+        info(f"Plage de rendements atteignables : [{E_vect.min():.2f}%, {E_vect.max():.2f}%]")
+        E_c = saisir_float("Rendement cible (%)", defaut=round(E_vect.mean(),1),
+                           min_val=E_vect.min(), max_val=E_vect.max())
+        w = optimiser_min_variance(cov, E_cible=E_c)
+        afficher_portefeuille(f"Portefeuille — Cible Ẽ ≥ {E_c:.2f}%", w)
 
-    ax.set_xlabel("Rendement (%)")
-    ax.set_ylabel("Degré d'appartenance μ(x)")
-    ax.set_title("Fonctions d'appartenance triangulaires")
-    ax.legend(fontsize=8)
-    ax.set_ylim(0, 1.12)
-    ax.grid(True, alpha=0.3)
+    elif choix == "4":
+        E_vect = np.array([esperance_floue(ACTIFS[n]) for n in ACTIFS])
+        w_mv = optimiser_min_variance(cov)
+        w_ms = optimiser_max_sharpe(cov)
+        w_eq = np.ones(len(ACTIFS)) / len(ACTIFS)
+        afficher_portefeuille("① Minimum Variance", w_mv)
+        afficher_portefeuille("② Maximum Sharpe Flou", w_ms)
+        afficher_portefeuille("③ Équipondéré (référence)", w_eq)
 
-    # ── 4d. α-coupes ─────────────────────────────────────────────────────────
-    ax = axes[1, 1]
-    alphas_plot = np.linspace(0, 1, 50)
-    for (nom, actif), couleur in zip(ACTIFS.items(), COULEURS):
-        lo_arr = [alpha_coupe(actif, a)[0] for a in alphas_plot]
-        hi_arr = [alpha_coupe(actif, a)[1] for a in alphas_plot]
-        ax.fill_between(alphas_plot, lo_arr, hi_arr,
-                        alpha=0.25, color=couleur)
-        ax.plot(alphas_plot, lo_arr, color=couleur, lw=1.5)
-        ax.plot(alphas_plot, hi_arr, color=couleur, lw=1.5, label=nom)
+        # Graphique comparatif
+        voir = input("\n  Afficher le graphique comparatif ? (o/n) [o] : ").strip().lower()
+        if voir != "n":
+            risques, rendements, _ = calculer_frontiere(cov)
+            fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+            ax = axes[0]
+            ax.plot(risques, rendements, color="#1D9E75", lw=2.5, label="Front d'efficience")
+            for w, label, marker, col in [
+                (w_mv, "Min Variance", "o", "#378ADD"),
+                (w_ms, "Max Sharpe",   "*", "#D85A30"),
+                (w_eq, "Équipondéré",  "s", "#7F77DD"),
+            ]:
+                ax.scatter(np.sqrt(variance_portefeuille(w, cov)),
+                           esperance_portefeuille(w),
+                           s=120, marker=marker, color=col, zorder=5, label=label)
+            ax.axhline(RF, color="gray", ls="--", lw=1, label=f"rf = {RF}%")
+            ax.set_xlabel("σ̃(P) (%)"); ax.set_ylabel("Ẽ(P) (%)")
+            ax.set_title("Frontière d'efficience floue"); ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
-    ax.axvline(ALPHA, color="black", ls="--", lw=1.2,
-               label=f"α = {ALPHA} (défaut)")
-    ax.set_xlabel("Niveau α")
-    ax.set_ylabel("Intervalle de rendement (%)")
-    ax.set_title("Évolution des α-coupes par actif")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
+            ax2 = axes[1]
+            x = np.arange(len(NOMS)); lar = 0.25
+            for j, (w, label, col) in enumerate([
+                (w_mv, "Min Variance", "#378ADD"),
+                (w_ms, "Max Sharpe",   "#D85A30"),
+                (w_eq, "Équipondéré",  "#7F77DD"),
+            ]):
+                ax2.bar(x + j*lar, w*100, lar, label=label, color=col, alpha=0.85)
+            ax2.set_xticks(x + lar); ax2.set_xticklabels(NOMS, fontsize=9, rotation=10)
+            ax2.set_ylabel("Poids (%)"); ax2.set_title("Allocations comparées")
+            ax2.legend(fontsize=9); ax2.grid(axis="y", alpha=0.3)
+            plt.tight_layout(); plt.show()
 
-    plt.tight_layout()
-    plt.savefig("portefeuille_flou_resultats.png", dpi=150, bbox_inches="tight")
-    print("\n  Graphique sauvegardé → portefeuille_flou_resultats.png")
-    plt.show()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. RAPPORT TERMINAL
-# ─────────────────────────────────────────────────────────────────────────────
-
-def afficher_rapport(cov: np.ndarray, w_mv: np.ndarray, w_ms: np.ndarray):
-    ligne = "═" * 65
-
-    print("\n" + ligne)
-    print("  RAPPORT — PORTEFEUILLE À REVENUS FLOUS")
-    print(ligne)
-
-    # Paramètres des actifs
-    print(f"\n  {'Actif':<16} {'Ẽ (%)':>8} {'σ̃ (%)':>8} {'σ̃² ':>8} {'Asymétrie':>10}")
-    print("  " + "─"*57)
-    for nom, actif in ACTIFS.items():
-        E = esperance_floue(actif)
-        V = variance_floue(actif)
-        S = ecart_type_flou(actif)
-        asym = (actif["r_mod"] - actif["r_min"]) / (actif["r_max"] - actif["r_min"])
-        print(f"  {nom:<16} {E:>8.3f} {S:>8.3f} {V:>8.3f} {asym:>10.3f}")
-
-    print(f"\n  Matrice de covariance floue Σ̃ :")
-    for row in cov:
-        print("    " + "  ".join(f"{v:7.4f}" for v in row))
-
-    # Portefeuille min variance
-    ep_mv = esperance_portefeuille(w_mv)
-    vp_mv = variance_portefeuille(w_mv, cov)
-    sh_mv = ratio_sharpe_flou(w_mv, cov)
-    pi_mv = indice_possibilite(w_mv, cov)
-
-    print(f"\n  {'─'*57}")
-    print(f"  PORTEFEUILLE MINIMUM VARIANCE")
-    print(f"  {'─'*57}")
-    for nom, wi in zip(NOMS, w_mv):
-        bar = "█" * int(wi * 30)
-        print(f"  {nom:<16} {wi*100:>6.2f}%  {bar}")
-    print(f"\n  Espérance floue Ẽ(P)   = {ep_mv:.4f} %")
-    print(f"  Variance floue σ̃²(P)  = {vp_mv:.4f}")
-    print(f"  Écart-type flou σ̃(P)  = {np.sqrt(vp_mv):.4f} %")
-    print(f"  Ratio de Sharpe flou  = {sh_mv:.4f}")
-    print(f"  Indice de possibilité = {pi_mv:.4f}")
-
-    # Portefeuille max Sharpe
-    ep_ms = esperance_portefeuille(w_ms)
-    vp_ms = variance_portefeuille(w_ms, cov)
-    sh_ms = ratio_sharpe_flou(w_ms, cov)
-    pi_ms = indice_possibilite(w_ms, cov)
-
-    print(f"\n  {'─'*57}")
-    print(f"  PORTEFEUILLE MAX SHARPE FLOU")
-    print(f"  {'─'*57}")
-    for nom, wi in zip(NOMS, w_ms):
-        bar = "█" * int(wi * 30)
-        print(f"  {nom:<16} {wi*100:>6.2f}%  {bar}")
-    print(f"\n  Espérance floue Ẽ(P)   = {ep_ms:.4f} %")
-    print(f"  Variance floue σ̃²(P)  = {vp_ms:.4f}")
-    print(f"  Écart-type flou σ̃(P)  = {np.sqrt(vp_ms):.4f} %")
-    print(f"  Ratio de Sharpe flou  = {sh_ms:.4f}")
-    print(f"  Indice de possibilité = {pi_ms:.4f}")
-
-    print("\n" + ligne + "\n")
+    pause()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. POINT D'ENTRÉE
+# MODULE 4 — SIMULATEUR DE PORTEFEUILLE PERSONNALISÉ
+# ─────────────────────────────────────────────────────────────────────────────
+
+def menu_simulateur():
+    titre("SIMULATEUR DE PORTEFEUILLE PERSONNALISÉ")
+    NOMS = list(ACTIFS.keys())
+    N    = len(NOMS)
+    info("Entrez vos propres poids et observez les métriques en temps réel.")
+
+    while True:
+        sous_titre("Saisie des poids")
+        poids = []
+        for nom in NOMS:
+            w = saisir_float(f"w({nom}) %", defaut=round(100/N, 1), min_val=0.0, max_val=100.0)
+            poids.append(w / 100)
+
+        total = sum(poids)
+        if abs(total - 1.0) > 1e-3:
+            warn(f"Somme des poids = {total*100:.1f}% ≠ 100%. Normalisation automatique.")
+            poids = [p / total for p in poids]
+
+        w   = np.array(poids)
+        cov = matrice_covariance_floue()
+        ep  = esperance_portefeuille(w)
+        vp  = variance_portefeuille(w, cov)
+        sh  = ratio_sharpe_flou(w, cov, rf=RF)
+        pi  = indice_possibilite(w, cov, seuil=RF)
+
+        sous_titre("Résultats")
+        print(f"  {BOLD}{'Actif':<16} {'Poids':>8}  Barre{RESET}")
+        for nom, wi in zip(NOMS, w):
+            barre = "█" * int(wi * 32)
+            print(f"  {nom:<16} {wi*100:>7.2f}%  {CYAN}{barre}{RESET}")
+        print(f"\n  {GREEN}Ẽ(P)             = {ep:.4f} %{RESET}")
+        print(f"  {GREEN}σ̃²(P)            = {vp:.4f}{RESET}")
+        print(f"  {GREEN}σ̃(P)             = {np.sqrt(vp):.4f} %{RESET}")
+        print(f"  {GREEN}Ratio de Sharpe  = {sh:.4f}{RESET}")
+        print(f"  {GREEN}Indice possib.   = {pi:.4f}{RESET}")
+
+        # Comparaison avec optimal
+        w_opt = optimiser_max_sharpe(cov)
+        sh_opt = ratio_sharpe_flou(w_opt, cov, rf=RF)
+        gap = sh_opt - sh
+        if gap > 0.01:
+            warn(f"Le portefeuille optimal (Max Sharpe) aurait un ratio de {sh_opt:.4f} (+{gap:.4f}).")
+        else:
+            ok("Votre allocation est proche de l'optimum !")
+
+        again = input("\n  Essayer une autre allocation ? (o/n) [o] : ").strip().lower()
+        if again == "n":
+            break
+
+    pause()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODULE 5 — GRAPHIQUES COMPLETS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def menu_graphiques():
+    titre("VISUALISATION COMPLÈTE")
+    print("  [1] Front d'efficience flou")
+    print("  [2] Fonctions d'appartenance")
+    print("  [3] α-coupes par actif")
+    print("  [4] Allocation optimale (camembert)")
+    print("  [5] Tableau de bord complet (4 graphiques)")
+
+    choix = input(f"\n  {BOLD}Choix :{RESET} ").strip()
+    cov   = matrice_covariance_floue()
+    w_mv  = optimiser_min_variance(cov)
+    w_ms  = optimiser_max_sharpe(cov)
+    NOMS  = list(ACTIFS.keys())
+    COULEURS = ["#1D9E75", "#378ADD", "#7F77DD", "#D85A30"]
+
+    if choix == "1":
+        risques, rendements, _ = calculer_frontiere(cov)
+        fig, ax = plt.subplots(figsize=(9, 6))
+        ax.plot(risques, rendements, color="#1D9E75", lw=2.5, label="Front d'efficience flou")
+        for w, label, marker, col in [
+            (w_mv, "Min Variance", "o", "#378ADD"),
+            (w_ms, "Max Sharpe",   "*", "#D85A30"),
+        ]:
+            ax.scatter(np.sqrt(variance_portefeuille(w, cov)), esperance_portefeuille(w),
+                       s=140, marker=marker, color=col, zorder=5, label=label)
+        ax.axhline(RF, color="gray", ls="--", lw=1, label=f"rf = {RF}%")
+        ax.set_xlabel("Risque flou σ̃(P) (%)"); ax.set_ylabel("Espérance floue Ẽ(P) (%)")
+        ax.set_title("Frontière d'efficience floue"); ax.legend(); ax.grid(True, alpha=0.3)
+        plt.tight_layout(); plt.show()
+
+    elif choix == "2":
+        fig, ax = plt.subplots(figsize=(9, 5))
+        for (nom, actif), col in zip(ACTIFS.items(), COULEURS):
+            a, m, b = actif["r_min"], actif["r_mod"], actif["r_max"]
+            xs = np.linspace(a - 1, b + 1, 300)
+            ys = [membership(x, actif) for x in xs]
+            ax.plot(xs, ys, color=col, lw=2.2, label=nom)
+            ax.fill_between(xs, ys, alpha=0.1, color=col)
+            ax.axvline(m, color=col, ls=":", lw=1)
+        ax.set_xlabel("Rendement (%)"); ax.set_ylabel("μ(x)")
+        ax.set_title("Fonctions d'appartenance triangulaires")
+        ax.set_ylim(0, 1.15); ax.legend(); ax.grid(True, alpha=0.3)
+        plt.tight_layout(); plt.show()
+
+    elif choix == "3":
+        alpha_input = saisir_float("Niveau α à afficher", defaut=ALPHA, min_val=0.0, max_val=1.0)
+        fig, ax = plt.subplots(figsize=(9, 5))
+        alphas_plot = np.linspace(0, 1, 80)
+        for (nom, actif), col in zip(ACTIFS.items(), COULEURS):
+            lo_arr = [alpha_coupe(actif, a)[0] for a in alphas_plot]
+            hi_arr = [alpha_coupe(actif, a)[1] for a in alphas_plot]
+            ax.fill_between(alphas_plot, lo_arr, hi_arr, alpha=0.18, color=col)
+            ax.plot(alphas_plot, lo_arr, color=col, lw=1.8)
+            ax.plot(alphas_plot, hi_arr, color=col, lw=1.8, label=nom)
+        ax.axvline(alpha_input, color="black", ls="--", lw=1.5, label=f"α = {alpha_input:.2f}")
+        ax.set_xlabel("Niveau α"); ax.set_ylabel("Rendement (%)")
+        ax.set_title("Évolution des α-coupes"); ax.legend(); ax.grid(True, alpha=0.3)
+        plt.tight_layout(); plt.show()
+
+    elif choix == "4":
+        fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+        for ax, w, label in [(axes[0], w_mv, "Min Variance"), (axes[1], w_ms, "Max Sharpe")]:
+            wedges, texts, autotexts = ax.pie(
+                w, labels=NOMS, colors=COULEURS,
+                autopct="%1.1f%%", startangle=90,
+                wedgeprops={"edgecolor": "white", "linewidth": 1.5})
+            for at in autotexts: at.set_fontsize(9)
+            ax.set_title(f"Portefeuille {label}")
+        plt.suptitle("Allocations optimales", fontweight="bold")
+        plt.tight_layout(); plt.show()
+
+    elif choix == "5":
+        risques, rendements, _ = calculer_frontiere(cov)
+        fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+        fig.suptitle("Gestion de Portefeuille à Revenus Flous", fontsize=14, fontweight="bold")
+
+        ax = axes[0, 0]
+        ax.plot(risques, rendements, color="#1D9E75", lw=2.5, label="Front d'efficience")
+        for w, label, marker, col in [(w_mv,"Min Variance","o","#378ADD"),(w_ms,"Max Sharpe","*","#D85A30")]:
+            ax.scatter(np.sqrt(variance_portefeuille(w,cov)), esperance_portefeuille(w),
+                       s=120, marker=marker, color=col, zorder=5, label=label)
+        ax.axhline(RF, color="gray", ls="--", lw=1)
+        ax.set_xlabel("σ̃(P) (%)"); ax.set_ylabel("Ẽ(P) (%)")
+        ax.set_title("Frontière d'efficience floue"); ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+
+        ax = axes[0, 1]
+        x = np.arange(len(NOMS)); lar = 0.35
+        ax.bar(x-lar/2, w_mv*100, lar, color=COULEURS, alpha=0.85, label="Min Variance")
+        ax.bar(x+lar/2, w_ms*100, lar, color=COULEURS, alpha=0.45,
+               edgecolor=COULEURS, linewidth=1.5, label="Max Sharpe")
+        ax.set_xticks(x); ax.set_xticklabels(NOMS, fontsize=9, rotation=10)
+        ax.set_ylabel("Poids (%)"); ax.set_title("Allocations comparées")
+        ax.legend(fontsize=9); ax.grid(axis="y", alpha=0.3)
+
+        ax = axes[1, 0]
+        for (nom, actif), col in zip(ACTIFS.items(), COULEURS):
+            a, m, b = actif["r_min"], actif["r_mod"], actif["r_max"]
+            xs = np.linspace(a-1, b+1, 300)
+            ys = [membership(x, actif) for x in xs]
+            ax.plot(xs, ys, color=col, lw=2, label=nom)
+            ax.fill_between(xs, ys, alpha=0.08, color=col)
+        ax.set_xlabel("Rendement (%)"); ax.set_ylabel("μ(x)")
+        ax.set_title("Fonctions d'appartenance"); ax.legend(fontsize=8)
+        ax.set_ylim(0, 1.15); ax.grid(True, alpha=0.3)
+
+        ax = axes[1, 1]
+        alphas_plot = np.linspace(0, 1, 80)
+        for (nom, actif), col in zip(ACTIFS.items(), COULEURS):
+            lo_arr = [alpha_coupe(actif, a)[0] for a in alphas_plot]
+            hi_arr = [alpha_coupe(actif, a)[1] for a in alphas_plot]
+            ax.fill_between(alphas_plot, lo_arr, hi_arr, alpha=0.18, color=col)
+            ax.plot(alphas_plot, lo_arr, color=col, lw=1.5)
+            ax.plot(alphas_plot, hi_arr, color=col, lw=1.5, label=nom)
+        ax.axvline(ALPHA, color="black", ls="--", lw=1.2)
+        ax.set_xlabel("Niveau α"); ax.set_ylabel("Rendement (%)")
+        ax.set_title("α-coupes par actif"); ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        path = "portefeuille_flou_resultats.png"
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        ok(f"Graphique sauvegardé → {path}")
+        plt.show()
+
+    else:
+        warn("Choix invalide.")
+
+    pause()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MENU PRINCIPAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+def menu_principal():
+    while True:
+        print(f"\n{BOLD}{CYAN}{'╔' + '═'*58 + '╗'}{RESET}")
+        print(f"{BOLD}{CYAN}║{'PORTEFEUILLE À REVENUS FLOUS':^58}║{RESET}")
+        print(f"{BOLD}{CYAN}║{'Kevin xxx — Master Intelligence Artificielle':^58}║{RESET}")
+        print(f"{BOLD}{CYAN}{'╚' + '═'*58 + '╝'}{RESET}")
+
+        print(f"""
+  {BOLD}[1]{RESET}  Gérer les actifs            {DIM}(ajouter, modifier, supprimer){RESET}
+  {BOLD}[2]{RESET}  Simulateur α-coupe          {DIM}(intervalles de confiance flous){RESET}
+  {BOLD}[3]{RESET}  Optimisation du portefeuille {DIM}(min variance / max Sharpe / cible){RESET}
+  {BOLD}[4]{RESET}  Simulateur personnalisé      {DIM}(tester vos propres poids){RESET}
+  {BOLD}[5]{RESET}  Visualisation               {DIM}(front efficience, graphiques){RESET}
+  {BOLD}[q]{RESET}  Quitter
+""")
+        choix = input(f"  {BOLD}Votre choix :{RESET} ").strip().lower()
+
+        if   choix == "1": menu_actifs()
+        elif choix == "2": menu_alpha()
+        elif choix == "3": menu_optimisation()
+        elif choix == "4": menu_simulateur()
+        elif choix == "5": menu_graphiques()
+        elif choix == "q":
+            print(f"\n  {GREEN}Au revoir !{RESET}\n")
+            sys.exit(0)
+        else:
+            warn("Choix invalide, entrez un chiffre entre 1 et 5.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POINT D'ENTRÉE
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-
-    print("\n  Calcul de la matrice de covariance floue...")
-    cov = matrice_covariance_floue()
-
-    print("  Optimisation — Minimum Variance...")
-    w_mv = optimiser_min_variance(cov)
-
-    print("  Optimisation — Maximum Sharpe Flou...")
-    w_ms = optimiser_max_sharpe(cov)
-
-    # Analyse des α-coupes
-    analyser_alpha_coupes(alphas=[0.0, 0.25, 0.5, 0.75, 1.0])
-
-    # Rapport complet
-    afficher_rapport(cov, w_mv, w_ms)
-
-    # Graphiques
-    tracer_resultats(cov, w_mv, w_ms)
+    try:
+        menu_principal()
+    except KeyboardInterrupt:
+        print(f"\n\n  {YELLOW}Programme interrompu.{RESET}\n")
+        sys.exit(0)
