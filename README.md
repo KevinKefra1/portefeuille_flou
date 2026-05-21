@@ -385,4 +385,4 @@ Master 2 Intelligence Artificielle
 *Projet académique — Probabilités et Raisonnement Probabiliste*
 
 
-GitHub : https://github.com/FranckTcheumt/TCHEUMTCHOUA_KOAGNE_FRANCK_MASTER2_IA
+GitHub : https://github.com/KevinKefra1/portefeuille_flou.git
